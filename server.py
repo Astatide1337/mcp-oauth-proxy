@@ -7,12 +7,14 @@ from urllib.parse import urlencode
 
 import jwt
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 from fastmcp.server.auth.middleware import RequireAuthMiddleware
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, OAuthProvider
 from mcp.server.auth.provider import AuthorizationCode, AuthorizationParams, OAuthToken, RefreshToken
 from mcp.server.auth.settings import ClientRegistrationOptions
+from mcp.server.auth.routes import cors_middleware
 from mcp.shared.auth import InvalidRedirectUriError, OAuthClientInformationFull
 from mcp.server.auth.middleware.client_auth import AuthenticationError, ClientAuthenticator
 from mcp.server.auth.handlers.token import (
@@ -55,6 +57,24 @@ class CloudflareAccessOAuthProvider(OAuthProvider):
         self._jwks_client = jwt.PyJWKClient(
             f"https://{CLOUDFLARE_TEAM_DOMAIN}/cdn-cgi/access/certs"
         )
+
+    def get_routes(self, mcp_path: str | None = None) -> list[Route]:
+        metadata_endpoints = {
+            "/.well-known/oauth-authorization-server": oauth_authorization_server_metadata,
+            f"/.well-known/oauth-protected-resource{mcp_path or MCP_PATH}": oauth_protected_resource_metadata,
+        }
+        routes = []
+        for route in super().get_routes(mcp_path):
+            endpoint = metadata_endpoints.get(route.path)
+            if endpoint is not None:
+                route = Route(
+                    route.path,
+                    endpoint=cors_middleware(endpoint, ["GET", "OPTIONS"]),
+                    methods=["GET", "OPTIONS"],
+                    name=route.name,
+                )
+            routes.append(route)
+        return routes
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         if client_id not in self._clients:
@@ -304,7 +324,6 @@ mcp = FastMCP.as_proxy(
 )
 
 
-@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
 async def oauth_authorization_server_metadata(request):
     issuer = PUBLIC_BASE_URL.rstrip("/")
     return JSONResponse({
@@ -319,7 +338,6 @@ async def oauth_authorization_server_metadata(request):
     }, headers={"Cache-Control": "public, max-age=3600"})
 
 
-@mcp.custom_route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])
 async def oauth_protected_resource_metadata(request):
     issuer = PUBLIC_BASE_URL.rstrip("/")
     return JSONResponse({
